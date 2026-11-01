@@ -23,7 +23,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
-import dev.chrisbanes.haze.rememberHazeState
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -55,11 +54,9 @@ fun App() {
     CompositionLocalProvider(LocalColors provides colors) {
         val grid = rememberLazyStaggeredGridState()
         val header = rememberHeaderState(grid)
-        val haze = rememberHazeState()
         Box(Modifier.fillMaxSize().background(colors.bg)) {
-            Feed(grid, header, haze)
-            TopFade(header, haze, Modifier.align(Alignment.TopCenter))
-            BottomFade(haze, Modifier.align(Alignment.BottomCenter))
+            Feed(grid, header)
+            TopFade(header, Modifier.align(Alignment.TopCenter))
             Header(header) { light = !light }
             Island(Modifier.align(Alignment.BottomCenter))
         }

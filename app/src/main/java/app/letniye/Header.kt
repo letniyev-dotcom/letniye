@@ -34,13 +34,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
-import dev.chrisbanes.haze.HazeProgressive
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeEffect
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.exclude
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -54,22 +47,30 @@ import kotlin.math.max
 
 /**
  * Растворение шапки: p = 0 (шапка на месте) … 1 (растворилась).
- * Прокрутка вниз двигает p вперёд на dy/150, вверх — назад; через 140 мс тишины p
- * довозится до 0 или 1 за 240 мс. Всё пишется только в graphicsLayer — без перекомпозиций.
+ * Шапка не тянется за пальцем: как только направление прокрутки определилось
+ * (вниз на 16dp / вверх на 10dp), она сама доезжает до конца за 240 мс.
+ * Всё пишется только в graphicsLayer — без перекомпозиций.
  */
 @Stable
 class HeaderState(val grid: LazyStaggeredGridState, private val density: Float) {
     var p by mutableFloatStateOf(0f)
     var y by mutableFloatStateOf(0f)   // scrollTop в dp
-    var tick by mutableIntStateOf(0)
+    var target by mutableFloatStateOf(0f)
+    private var acc = 0f
 
     val connection = object : NestedScrollConnection {
         override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
             if (consumed.y == 0f) return Offset.Zero
             val d = -consumed.y / density
             y = if (!grid.canScrollBackward) 0f else max(0f, y + d)
-            p = if (y < 8f) 0f else cl(p + d / 150f)
-            tick++
+            if (y < 8f) {
+                acc = 0f
+                target = 0f
+            } else {
+                if ((d > 0f) != (acc > 0f)) acc = 0f
+                acc += d
+                if (acc > 16f) target = 1f else if (acc < -10f) target = 0f
+            }
             return Offset.Zero
         }
     }
@@ -80,10 +81,7 @@ fun rememberHeaderState(grid: LazyStaggeredGridState): HeaderState {
     val density = LocalDensity.current.density
     val h = remember(grid) { HeaderState(grid, density) }
     LaunchedEffect(h) {
-        snapshotFlow { h.tick }.collectLatest {
-            delay(140)
-            if (!h.grid.canScrollBackward) h.y = 0f
-            val to = if (h.y < 8f || h.p < .4f) 0f else 1f
+        snapshotFlow { h.target }.collectLatest { to ->
             animate(h.p, to, animationSpec = tween(240, easing = CubicBezierEasing(.215f, .61f, .355f, 1f))) { v, _ ->
                 h.p = v
             }
@@ -167,63 +165,18 @@ fun Header(h: HeaderState, onThemeToggle: () -> Unit) {
 }
 
 /**
- * Вуаль, как в чате (wallVeil): 13 ступеней цвета фона, у края «полка» полной
- * непрозрачности (hold — доля высоты), дальше smoothstep до нуля.
- */
-private fun veilBrush(bg: Color, fromTop: Boolean, hold: Float, strength: Float): Brush {
-    val stops = Array(13) { i ->
-        val t = i / 12f
-        val u = if (fromTop) ((t - hold) / (1f - hold)).coerceIn(0f, 1f)
-                else ((1f - t - hold) / (1f - hold)).coerceIn(0f, 1f)
-        val sm = u * u * (3f - 2f * u)
-        t to bg.copy(alpha = strength * (1f - sm))
-    }
-    return Brush.verticalGradient(*stops)
-}
-
-/**
- * Верхняя вуаль: прогрессивное размытие (Haze, как в iOS) + лёгкий фейд цветом фона.
- * Размытие сильнее у верхнего края и плавно сходит на нет вниз. В покое слой прозрачен,
- * растёт за первые 30dp прокрутки, когда шапка растворилась — снова 0.
+ * Классическая подложка под шапкой (вместо фейда): сплошной цвет фона высотой в статус-бар + шапку.
+ * Анимация прежняя: в покое 0, растёт за первые 30dp прокрутки, когда шапка растворилась — снова 0.
  */
 @Composable
-fun TopFade(h: HeaderState, haze: HazeState, modifier: Modifier = Modifier) {
+fun TopFade(h: HeaderState, modifier: Modifier = Modifier) {
     val c = LocalColors.current
     val inset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    val brush = remember(c.bg) { veilBrush(c.bg, fromTop = true, hold = 0f, strength = .5f) }
     Box(
         modifier
             .fillMaxWidth()
-            .height(inset + 98.dp)
+            .height(inset + 56.dp)
             .graphicsLayer { alpha = (1f - ez(cl(h.p * 1.15f))) * ez(cl(h.y / 30f)) }
-            .hazeEffect(haze) {
-                blurRadius = 14.dp
-                noiseFactor = 0f
-                progressive = HazeProgressive.verticalGradient(startIntensity = 1f, endIntensity = 0f)
-            }
-            .background(brush),
-    )
-}
-
-/**
- * Нижняя вуаль над островком: то же прогрессивное размытие, сильнее у нижнего края.
- * Поднимается вместе с клавиатурой, как островок.
- */
-@Composable
-fun BottomFade(haze: HazeState, modifier: Modifier = Modifier) {
-    val c = LocalColors.current
-    val nav = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-    val brush = remember(c.bg) { veilBrush(c.bg, fromTop = false, hold = 0f, strength = .6f) }
-    Box(
-        modifier
-            .fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.ime.exclude(WindowInsets.navigationBars))
-            .height(nav + 92.dp)
-            .hazeEffect(haze) {
-                blurRadius = 14.dp
-                noiseFactor = 0f
-                progressive = HazeProgressive.verticalGradient(startIntensity = 0f, endIntensity = 1f)
-            }
-            .background(brush),
+            .background(c.bg),
     )
 }
