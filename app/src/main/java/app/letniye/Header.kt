@@ -34,6 +34,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import dev.chrisbanes.haze.HazeProgressive
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeEffect
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.exclude
@@ -179,38 +182,48 @@ private fun veilBrush(bg: Color, fromTop: Boolean, hold: Float, strength: Float)
 }
 
 /**
- * Фейд под шапкой — тот же, что в чате: полка 34% высоты, дальше smoothstep, сила 1.
- * 98dp ниже статус-бара. В покое 0, растёт за первые 30dp прокрутки,
- * когда шапка растворилась — снова 0.
+ * Верхняя вуаль: прогрессивное размытие (Haze, как в iOS) + лёгкий фейд цветом фона.
+ * Размытие сильнее у верхнего края и плавно сходит на нет вниз. В покое слой прозрачен,
+ * растёт за первые 30dp прокрутки, когда шапка растворилась — снова 0.
  */
 @Composable
-fun TopFade(h: HeaderState, modifier: Modifier = Modifier) {
+fun TopFade(h: HeaderState, haze: HazeState, modifier: Modifier = Modifier) {
     val c = LocalColors.current
     val inset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    val brush = remember(c.bg) { veilBrush(c.bg, fromTop = true, hold = .34f, strength = 1f) }
+    val brush = remember(c.bg) { veilBrush(c.bg, fromTop = true, hold = 0f, strength = .5f) }
     Box(
         modifier
             .fillMaxWidth()
             .height(inset + 98.dp)
             .graphicsLayer { alpha = (1f - ez(cl(h.p * 1.15f))) * ez(cl(h.y / 30f)) }
+            .hazeEffect(haze) {
+                blurRadius = 14.dp
+                noiseFactor = 0f
+                progressive = HazeProgressive.verticalGradient(startIntensity = 1f, endIntensity = 0f)
+            }
             .background(brush),
     )
 }
 
 /**
- * Фейд над островком ввода — wallVeil снизу: сила .96, без полки, smoothstep от нижнего края.
+ * Нижняя вуаль над островком: то же прогрессивное размытие, сильнее у нижнего края.
  * Поднимается вместе с клавиатурой, как островок.
  */
 @Composable
-fun BottomFade(modifier: Modifier = Modifier) {
+fun BottomFade(haze: HazeState, modifier: Modifier = Modifier) {
     val c = LocalColors.current
     val nav = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-    val brush = remember(c.bg) { veilBrush(c.bg, fromTop = false, hold = 0f, strength = .96f) }
+    val brush = remember(c.bg) { veilBrush(c.bg, fromTop = false, hold = 0f, strength = .6f) }
     Box(
         modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.ime.exclude(WindowInsets.navigationBars))
             .height(nav + 92.dp)
+            .hazeEffect(haze) {
+                blurRadius = 14.dp
+                noiseFactor = 0f
+                progressive = HazeProgressive.verticalGradient(startIntensity = 0f, endIntensity = 1f)
+            }
             .background(brush),
     )
 }

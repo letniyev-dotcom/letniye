@@ -59,6 +59,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
@@ -72,13 +74,13 @@ private fun img(i: Int, w: Int, h: Int) = "https://picsum.photos/seed/$SEED$i/$w
 
 /** Лента: две равные колонки, карточка занимает колонку целиком, высота своя. */
 @Composable
-fun Feed(state: LazyStaggeredGridState, header: HeaderState) {
+fun Feed(state: LazyStaggeredGridState, header: HeaderState, haze: HazeState) {
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     LazyVerticalStaggeredGrid(
         columns = StaggeredGridCells.Fixed(2),
         state = state,
-        modifier = Modifier.fillMaxSize().nestedScroll(header.connection),
+        modifier = Modifier.fillMaxSize().hazeSource(haze).nestedScroll(header.connection),
         // 106px сверху = статус-бар + шапка 56 + 12; 96px снизу = островок + запас
         contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = top + 68.dp, bottom = bottom + 96.dp),
         verticalItemSpacing = 8.dp,
