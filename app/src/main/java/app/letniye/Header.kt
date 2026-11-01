@@ -34,6 +34,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.exclude
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -165,18 +169,53 @@ fun Header(h: HeaderState, onThemeToggle: () -> Unit) {
 }
 
 /**
- * Классическая подложка под шапкой (вместо фейда): сплошной цвет фона высотой в статус-бар + шапку.
- * Анимация прежняя: в покое 0, растёт за первые 30dp прокрутки, когда шапка растворилась — снова 0.
+ * Вуаль, как в чате (wallVeil): 13 ступеней цвета фона, у края «полка» полной
+ * непрозрачности (hold — доля высоты), дальше smoothstep до нуля.
+ */
+private fun veilBrush(bg: Color, fromTop: Boolean, hold: Float, strength: Float): Brush {
+    val stops = Array(13) { i ->
+        val t = i / 12f
+        val u = if (fromTop) ((t - hold) / (1f - hold)).coerceIn(0f, 1f)
+                else ((1f - t - hold) / (1f - hold)).coerceIn(0f, 1f)
+        val sm = u * u * (3f - 2f * u)
+        t to bg.copy(alpha = strength * (1f - sm))
+    }
+    return Brush.verticalGradient(*stops)
+}
+
+/**
+ * Фейд под шапкой — тот же, что в чате: полка 34% высоты, дальше smoothstep, сила 1.
+ * 98dp ниже статус-бара. В покое 0, растёт за первые 30dp прокрутки,
+ * когда шапка растворилась — снова 0.
  */
 @Composable
 fun TopFade(h: HeaderState, modifier: Modifier = Modifier) {
     val c = LocalColors.current
     val inset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val brush = remember(c.bg) { veilBrush(c.bg, fromTop = true, hold = .34f, strength = 1f) }
     Box(
         modifier
             .fillMaxWidth()
-            .height(inset + 56.dp)
+            .height(inset + 98.dp)
             .graphicsLayer { alpha = (1f - ez(cl(h.p * 1.15f))) * ez(cl(h.y / 30f)) }
-            .background(c.bg),
+            .background(brush),
+    )
+}
+
+/**
+ * Фейд над островком ввода — wallVeil снизу: сила .96, без полки, smoothstep от нижнего края.
+ * Поднимается вместе с клавиатурой, как островок.
+ */
+@Composable
+fun BottomFade(modifier: Modifier = Modifier) {
+    val c = LocalColors.current
+    val nav = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val brush = remember(c.bg) { veilBrush(c.bg, fromTop = false, hold = 0f, strength = .96f) }
+    Box(
+        modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.ime.exclude(WindowInsets.navigationBars))
+            .height(nav + 92.dp)
+            .background(brush),
     )
 }
