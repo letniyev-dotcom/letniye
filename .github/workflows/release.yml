@@ -1,0 +1,70 @@
+name: Release APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      # Если в Secrets есть KEYSTORE_BASE64 — подписываем вашим ключом.
+      # Если нет — создаём одноразовый ключ, чтобы APK всё равно устанавливался.
+      - name: Prepare signing key
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+          K_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          KS="$RUNNER_TEMP/release.jks"
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$KS"
+            echo "KEYSTORE_PASSWORD=$KS_PASS" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$KS_ALIAS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${K_PASS:-$KS_PASS}" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Secrets с ключом не заданы, APK подписан одноразовым ключом"
+            keytool -genkeypair -keystore "$KS" -storetype PKCS12 -alias letniye \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass letniye-ci -keypass letniye-ci -dname "CN=letniye"
+            echo "KEYSTORE_PASSWORD=letniye-ci" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=letniye" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=letniye-ci" >> "$GITHUB_ENV"
+          fi
+          echo "KEYSTORE_PATH=$KS" >> "$GITHUB_ENV"
+
+      - name: Build release
+        run: gradle assembleRelease --stacktrace
+
+      - name: Rename APK
+        run: mv app/build/outputs/apk/release/app-release.apk letniye-release.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: letniye-release-apk
+          path: letniye-release.apk
+
+      - name: Attach to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: letniye-release.apk
