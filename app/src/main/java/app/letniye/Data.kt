@@ -43,6 +43,7 @@ data class Post(
     val cx: Float = .5f,
     val cy: Float = .5f,
     val cd: Float = 1f,
+    val mir: Boolean = false,
 )
 
 /** false — убрать имена под постами совсем. */

@@ -17,6 +17,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.FileOutputOptions
@@ -53,6 +55,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -60,8 +63,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -82,11 +88,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** Видео как оно записано: путь к mp4, секунды, размер кадра уже с учётом поворота. */
-class VideoClip(val path: String, val sec: Int, val w: Int, val h: Int)
+class VideoClip(val path: String, val sec: Int, val w: Int, val h: Int, val mir: Boolean = false)
 
 /**
  * Готовый кружок: тот же mp4 + положение круглой рамки в кадре.
@@ -94,7 +101,7 @@ class VideoClip(val path: String, val sec: Int, val w: Int, val h: Int)
  */
 class VideoResult(
     val path: String, val sec: Int, val w: Int, val h: Int,
-    val cx: Float, val cy: Float, val cd: Float,
+    val cx: Float, val cy: Float, val cd: Float, val mir: Boolean,
 )
 
 fun fmtSec(s: Int) = (s / 60).toString() + ":" + (s % 60).toString().padStart(2, '0')
@@ -283,13 +290,13 @@ private fun Capture(micOk: Boolean, onClip: (VideoClip) -> Unit, onClose: () -> 
     var front by remember { mutableStateOf(true) }
     var torch by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
-    var ms by remember { mutableStateOf(0L) }
+    val ms = remember { mutableLongStateOf(0L) }
+    var sec by remember { mutableStateOf(0) }
     var camera by remember { mutableStateOf<Camera?>(null) }
     var cap by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
     val rec = remember { arrayOfNulls<Recording>(1) }
     val preview = remember {
         PreviewView(ctx).apply {
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
@@ -303,7 +310,13 @@ private fun Capture(micOk: Boolean, onClip: (VideoClip) -> Unit, onClose: () -> 
                 val o = owner ?: return@addListener
                 val p = fut.get()
                 prov = p
-                val pv = Preview.Builder().build().also { it.setSurfaceProvider(preview.surfaceProvider) }
+                val pv = Preview.Builder()
+                    .setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                            .build(),
+                    )
+                    .build().also { it.setSurfaceProvider(preview.surfaceProvider) }
                 val recorder = Recorder.Builder()
                     .setQualitySelector(QualitySelector.from(Quality.HD, FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)))
                     .build()
@@ -340,11 +353,18 @@ private fun Capture(micOk: Boolean, onClip: (VideoClip) -> Unit, onClose: () -> 
         val vc = cap ?: return
         val dir = File(ctx.filesDir, "video").apply { mkdirs() }
         val f = File(dir, "c_" + System.currentTimeMillis() + ".mp4")
-        ms = 0L
+        ms.longValue = 0L
+        sec = 0
+        val mirror = front
         recording = true
         rec[0] = startRec(ctx, vc, f, micOk) { ev ->
             when (ev) {
-                is VideoRecordEvent.Status -> ms = ev.recordingStats.recordedDurationNanos / 1_000_000L
+                is VideoRecordEvent.Status -> {
+                    val m = ev.recordingStats.recordedDurationNanos / 1_000_000L
+                    ms.longValue = m
+                    val sx = (m / 1000L).toInt()
+                    if (sx != sec) sec = sx
+                }
                 is VideoRecordEvent.Finalize -> {
                     recording = false
                     rec[0] = null
@@ -353,7 +373,7 @@ private fun Capture(micOk: Boolean, onClip: (VideoClip) -> Unit, onClose: () -> 
                     if (ok && f.length() > 0L) {
                         scope.launch {
                             val c = withContext(Dispatchers.IO) { probe(f.absolutePath) }
-                            onClip(c)
+                            onClip(VideoClip(c.path, c.sec, c.w, c.h, mirror))
                         }
                     } else f.delete()
                 }
@@ -376,7 +396,7 @@ private fun Capture(micOk: Boolean, onClip: (VideoClip) -> Unit, onClose: () -> 
         Box(Modifier.fillMaxWidth().statusBarsPadding().height(56.dp)) {
             CamBtn(R.drawable.ic_x, modifier = Modifier.align(Alignment.CenterStart).padding(start = 4.dp)) { onClose() }
             T(
-                if (recording) fmtSec((ms / 1000L).toInt()) else "Видео",
+                if (recording) fmtSec(sec) else "Видео",
                 ts(500, 16f, 22f, if (recording) CamAccent else Color.White),
                 Modifier.align(Alignment.Center),
             )
@@ -393,7 +413,10 @@ private fun Capture(micOk: Boolean, onClip: (VideoClip) -> Unit, onClose: () -> 
                 .background(Color.White.copy(alpha = .18f)),
         ) {
             Box(
-                Modifier.fillMaxWidth((ms.toFloat() / MAX_MS).coerceIn(0f, 1f)).fillMaxHeight().background(CamAccent),
+                Modifier.fillMaxSize().drawBehind {
+                    val f = (ms.longValue.toFloat() / MAX_MS).coerceIn(0f, 1f)
+                    drawRect(CamAccent, size = Size(size.width * f, size.height))
+                },
             )
         }
         // низ: переворот · запись · вспышка
@@ -437,16 +460,21 @@ private fun Capture(micOk: Boolean, onClip: (VideoClip) -> Unit, onClose: () -> 
 @Composable
 private fun Review(clip: VideoClip, onRetake: () -> Unit, onSend: (VideoResult) -> Unit) {
     val d = LocalDensity.current
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize().clipToBounds()) {
         val bw = with(d) { maxWidth.toPx() }
         val bh = with(d) { maxHeight.toPx() }
-        val ar = clip.w.toFloat() / clip.h
-        // видео целиком по центру
-        val vw = min(bw, bh * ar)
-        val vh = vw / ar
+        // как и в камере: кадр заполняет весь экран, лишнее по краям обрезано
+        val k = max(bw / clip.w, bh / clip.h)
+        val vw = clip.w * k
+        val vh = clip.h * k
         val vx = (bw - vw) / 2f
         val vy = (bh - vh) / 2f
-        val side = min(vw, vh)
+        // рамка живёт только в видимой части кадра
+        val ax = max(vx, 0f)
+        val ay = max(vy, 0f)
+        val zx = min(vx + vw, bw)
+        val zy = min(vy + vh, bh)
+        val side = min(zx - ax, zy - ay)
         val lo = min(side, with(d) { 96.dp.toPx() })
         var fd by remember(bw, bh) { mutableFloatStateOf(side * .8f) }
         var fx by remember(bw, bh) { mutableFloatStateOf(bw / 2f) }
@@ -456,15 +484,17 @@ private fun Review(clip: VideoClip, onRetake: () -> Unit, onSend: (VideoResult) 
             clip.path,
             Modifier
                 .offset { IntOffset(vx.roundToInt(), vy.roundToInt()) }
-                .size(with(d) { vw.toDp() }, with(d) { vh.toDp() }),
+                .wrapContentSize(Alignment.TopStart, unbounded = true)
+                .size(with(d) { vw.toDp() }, with(d) { vh.toDp() })
+                .graphicsLayer { scaleX = if (clip.mir) -1f else 1f },
         )
         // всё вне рамки затемнено; рамку двигаем и масштабируем жестами
         Canvas(
-            Modifier.fillMaxSize().pointerInput(vx, vy, vw, vh) {
+            Modifier.fillMaxSize().pointerInput(ax, ay, zx, zy) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     fd = (fd * zoom).coerceIn(lo, side)
-                    fx = (fx + pan.x).coerceIn(vx + fd / 2f, vx + vw - fd / 2f)
-                    fy = (fy + pan.y).coerceIn(vy + fd / 2f, vy + vh - fd / 2f)
+                    fx = (fx + pan.x).coerceIn(ax + fd / 2f, zx - fd / 2f)
+                    fy = (fy + pan.y).coerceIn(ay + fd / 2f, zy - fd / 2f)
                 }
             },
         ) {
@@ -500,7 +530,7 @@ private fun Review(clip: VideoClip, onRetake: () -> Unit, onSend: (VideoResult) 
                 CamBtn(R.drawable.ic_redo) { onRetake() }
                 Box(
                     Modifier.size(72.dp).tap {
-                        onSend(VideoResult(clip.path, clip.sec, clip.w, clip.h, (fx - vx) / vw, (fy - vy) / vh, fd / vw))
+                        onSend(VideoResult(clip.path, clip.sec, clip.w, clip.h, (fx - vx) / vw, (fy - vy) / vh, fd / vw, clip.mir))
                     },
                     contentAlignment = Alignment.Center,
                 ) { Ico(R.drawable.ic_send, CamAccent, Modifier.size(40.dp)) }
@@ -521,7 +551,7 @@ fun CircleVideo(p: Post, sound: Boolean, modifier: Modifier = Modifier) {
         val top = s / 2 - hf * p.cy
         LoopVideo(
             p.vid,
-            Modifier.offset(left, top).wrapContentSize(Alignment.TopStart, unbounded = true).size(wf, hf),
+            Modifier.offset(left, top).wrapContentSize(Alignment.TopStart, unbounded = true).size(wf, hf).graphicsLayer { scaleX = if (p.mir) -1f else 1f },
             sound,
         )
     }

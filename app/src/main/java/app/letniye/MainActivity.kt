@@ -73,7 +73,7 @@ fun App() {
                         0,
                         Post(
                             PostType.CIRCLE, "Илья", d = fmtSec(v.sec), id = 1000 + posts.size,
-                            vid = v.path, vw = v.w, vh = v.h, cx = v.cx, cy = v.cy, cd = v.cd,
+                            vid = v.path, vw = v.w, vh = v.h, cx = v.cx, cy = v.cy, cd = v.cd, mir = v.mir,
                         ),
                     )
                     scope.launch { grid.animateScrollToItem(0) }
