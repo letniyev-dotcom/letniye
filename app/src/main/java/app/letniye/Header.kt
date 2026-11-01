@@ -215,7 +215,7 @@ fun BottomFade(modifier: Modifier = Modifier) {
         modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.ime.exclude(WindowInsets.navigationBars))
-            .height(nav + 92.dp)
+            .height(nav + 80.dp)
             .background(brush),
     )
 }

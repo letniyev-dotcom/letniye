@@ -1,16 +1,19 @@
 package app.letniye
 
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
+import android.graphics.ComposeShader
+import android.graphics.LinearGradient
+import android.graphics.PorterDuff
+import android.graphics.Shader
 import android.graphics.BlurMaskFilter
 import android.graphics.Paint
-import android.graphics.drawable.BitmapDrawable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -35,25 +38,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.BlurredEdgeTreatment
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.asAndroidPath
@@ -73,6 +68,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import coil.transform.Transformation
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
@@ -93,8 +89,8 @@ fun Feed(state: LazyStaggeredGridState, header: HeaderState) {
         columns = StaggeredGridCells.Fixed(2),
         state = state,
         modifier = Modifier.fillMaxSize().nestedScroll(header.connection),
-        // 106px сверху = статус-бар + шапка 56 + 12; 96px снизу = островок + запас
-        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = top + 68.dp, bottom = bottom + 96.dp),
+        // 106px сверху = статус-бар + шапка 56 + 12; 84px снизу = островок 44 + 12 + запас
+        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = top + 68.dp, bottom = bottom + 84.dp),
         verticalItemSpacing = 8.dp,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -257,80 +253,132 @@ private fun coverColor(bmp: Bitmap): Color {
     return Color((r / w / 255).toFloat(), (g / w / 255).toFloat(), (b / w / 255).toFloat())
 }
 
-/** Слой блюра: та же обложка, размытая и проявленная маской от `from` до `to` высоты карточки. */
-@Composable
-private fun BoxScope.BlurLayer(req: ImageRequest, radius: Dp, from: Float, to: Float) {
-    val mask = Brush.verticalGradient(
-        colorStops = arrayOf(0f to Color.Transparent, from to Color.Transparent, to to Color.Black, 1f to Color.Black),
-    )
-    Box(
-        Modifier
-            .matchParentSize()
-            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-            .drawWithContent {
-                drawContent()
-                drawRect(mask, blendMode = BlendMode.DstIn)
-            },
-    ) {
-        AsyncImage(
-            req,
-            null,
-            Modifier
-                .matchParentSize()
-                .graphicsLayer { scaleX = 1.2f; scaleY = 1.2f }
-                .blur(radius, BlurredEdgeTreatment.Unbounded),
-            contentScale = ContentScale.Crop,
-        )
+/** Один проход скользящего среднего по строкам или столбцам, края повторяются. */
+private fun boxPass(px: IntArray, w: Int, h: Int, r: Int, horizontal: Boolean) {
+    val len = if (horizontal) w else h
+    val lines = if (horizontal) h else w
+    val line = IntArray(len)
+    val out = IntArray(len)
+    val div = 2 * r + 1
+    for (ln in 0 until lines) {
+        for (i in 0 until len) line[i] = if (horizontal) px[ln * w + i] else px[i * w + ln]
+        var sr = 0
+        var sg = 0
+        var sb = 0
+        for (i in -r..r) {
+            val v = line[i.coerceIn(0, len - 1)]
+            sr += (v shr 16) and 255
+            sg += (v shr 8) and 255
+            sb += v and 255
+        }
+        for (i in 0 until len) {
+            out[i] = (0xFF shl 24) or ((sr / div) shl 16) or ((sg / div) shl 8) or (sb / div)
+            val a = line[(i + r + 1).coerceAtMost(len - 1)]
+            val z = line[(i - r).coerceAtLeast(0)]
+            sr += ((a shr 16) and 255) - ((z shr 16) and 255)
+            sg += ((a shr 8) and 255) - ((z shr 8) and 255)
+            sb += (a and 255) - (z and 255)
+        }
+        for (i in 0 until len) if (horizontal) px[ln * w + i] = out[i] else px[i * w + ln] = out[i]
     }
 }
 
+/** Гауссово размытие: уменьшаем картинку, трижды сглаживаем по осям и растягиваем обратно. */
+private fun blurred(src: Bitmap, sigma: Float): Bitmap {
+    val k = maxOf(1, (sigma / 3f).toInt())
+    val sw = maxOf(2, src.width / k)
+    val sh = maxOf(2, src.height / k)
+    val px = IntArray(sw * sh)
+    Bitmap.createScaledBitmap(src, sw, sh, true).getPixels(px, 0, sw, 0, 0, sw, sh)
+    val r = maxOf(1, (sigma / k - .5f).roundToInt())
+    repeat(3) {
+        boxPass(px, sw, sh, r, true)
+        boxPass(px, sw, sh, r, false)
+    }
+    return Bitmap.createScaledBitmap(Bitmap.createBitmap(px, sw, sh, Bitmap.Config.ARGB_8888), src.width, src.height, true)
+}
+
 /**
- * Обложка на всю карточку 4:5, низ растворяется прогрессивным блюром (3 слоя) в тёмный оттенок
- * обложки, текст белый. Без объёма: ни кромки, ни тени. Блюр работает с Android 12 (API 31),
- * на старых версиях остаётся резкая обложка под тем же затемнением.
+ * Весь вид карточки музыки собирается один раз в одну картинку (Coil кэширует результат):
+ * обложка 4:5, три слоя блюра 6/14/28 с масками, затемнение цветом обложки.
+ * Раньше то же самое считалось на каждом кадре прокрутки: три размытых слоя поверх обложки.
+ * Работает на любой версии Android, а не только с 12.
  */
+private object MusicLook : Transformation {
+    override val cacheKey = "music-look-1"
+
+    override suspend fun transform(input: Bitmap, size: coil.size.Size): Bitmap {
+        val w = minOf(input.width, 480)
+        val h = w * 5 / 4
+        val H = h.toFloat()
+        // центрированная обрезка до 4:5
+        val sw: Int
+        val sh: Int
+        if (input.width * 5 > input.height * 4) {
+            sh = input.height
+            sw = input.height * 4 / 5
+        } else {
+            sw = input.width
+            sh = input.width * 5 / 4
+        }
+        val sx = (input.width - sw) / 2
+        val sy = (input.height - sh) / 2
+        val base = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        android.graphics.Canvas(base).drawBitmap(
+            input,
+            android.graphics.Rect(sx, sy, sx + sw, sy + sh),
+            android.graphics.Rect(0, 0, w, h),
+            Paint(Paint.FILTER_BITMAP_FLAG),
+        )
+        val out = base.copy(Bitmap.Config.ARGB_8888, true)
+        val cv = android.graphics.Canvas(out)
+        val rel = w / 188f // в прототипе карточка ~188px шириной
+        for ((sigma, from, to) in listOf(Triple(6f, .30f, .55f), Triple(14f, .45f, .72f), Triple(28f, .58f, .88f))) {
+            val mask = LinearGradient(
+                0f, 0f, 0f, H,
+                intArrayOf(0, 0, 0xFF000000.toInt(), 0xFF000000.toInt()),
+                floatArrayOf(0f, from, to, 1f),
+                Shader.TileMode.CLAMP,
+            )
+            val bl = blurred(base, sigma * rel)
+            val p = Paint(Paint.ANTI_ALIAS_FLAG)
+            p.shader = ComposeShader(BitmapShader(bl, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP), mask, PorterDuff.Mode.DST_IN)
+            cv.drawRect(0f, 0f, w.toFloat(), H, p)
+        }
+        val d = lerp(coverColor(base), Color.Black, .45f)
+        val clear = d.copy(alpha = 0f).toArgb()
+        val scrim = LinearGradient(
+            0f, 0f, 0f, H,
+            intArrayOf(clear, clear, d.copy(alpha = .55f).toArgb(), d.copy(alpha = .92f).toArgb()),
+            floatArrayOf(0f, .42f, .72f, 1f),
+            Shader.TileMode.CLAMP,
+        )
+        cv.drawRect(0f, 0f, w.toFloat(), H, Paint().apply { shader = scrim })
+        return out
+    }
+}
+
+/** Без объёма: ни кромки, ни тени. Внутри только готовая картинка и белый текст. */
 @Composable
 private fun MusicCard(p: Post, i: Int) {
     val src = remember { MutableInteractionSource() }
     val ctx = LocalContext.current
-    val url = img(i, PX, (PX * 1.25f).roundToInt())
-    val req = remember(url) { ImageRequest.Builder(ctx).data(url).allowHardware(false).build() }
-    var base by remember(url) { mutableStateOf(NO_COVER) }
-    val dark = lerp(base, Color.Black, .45f)
+    val req = remember(i) {
+        ImageRequest.Builder(ctx)
+            .data(img(i, PX, (PX * 1.25f).roundToInt()))
+            .transformations(MusicLook)
+            .allowHardware(false)
+            .build()
+    }
     Box(
         Modifier
             .fillMaxWidth()
             .press(src)
             .aspectRatio(4f / 5f)
             .clip(RoundedCornerShape(26.dp))
-            .background(base),
+            .background(NO_COVER),
     ) {
-        AsyncImage(
-            req,
-            null,
-            Modifier.matchParentSize(),
-            onSuccess = { st ->
-                (st.result.drawable as? BitmapDrawable)?.bitmap?.let { bmp ->
-                    runCatching { coverColor(bmp) }.getOrNull()?.let { base = it }
-                }
-            },
-            contentScale = ContentScale.Crop,
-        )
-        BlurLayer(req, 6.dp, .30f, .55f)
-        BlurLayer(req, 14.dp, .45f, .72f)
-        BlurLayer(req, 28.dp, .58f, .88f)
-        Box(
-            Modifier.matchParentSize().background(
-                Brush.verticalGradient(
-                    colorStops = arrayOf(
-                        0f to Color.Transparent,
-                        .42f to Color.Transparent,
-                        .72f to dark.copy(alpha = .55f),
-                        1f to dark.copy(alpha = .92f),
-                    ),
-                ),
-            ),
-        )
+        AsyncImage(req, null, Modifier.matchParentSize(), contentScale = ContentScale.Crop)
         Row(
             Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(start = 16.dp, end = 12.dp, bottom = 14.dp),
             verticalAlignment = Alignment.Bottom,
@@ -399,7 +447,7 @@ private fun Modifier.glass(c: LColors, radius: Dp, pressed: Boolean, n: Color): 
             setShadowLayer(14.dp.toPx(), 0f, 6.dp.toPx(), n.copy(alpha = .16f).toArgb())
         }
         val clip = Path().apply { addRoundRect(RoundRect(0f, 0f, w, h, corner)) }
-        val m = 40.dp.toPx()
+        val m = 16.dp.toPx() // запас больше радиуса размытия (11dp): вид тот же, площадь в разы меньше
         val frame = Path().apply {
             fillType = PathFillType.EvenOdd
             addRect(Rect(-m, -m, w + m, h + m))

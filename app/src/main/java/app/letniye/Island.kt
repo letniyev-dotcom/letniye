@@ -39,13 +39,14 @@ fun Island(modifier: Modifier = Modifier) {
     var text by rememberSaveable { mutableStateOf("") }
     var circle by rememberSaveable { mutableStateOf(false) }
     val has = text.isNotBlank()
-    val fill = c.island.copy(alpha = .92f)
+    // почти белая плотная заливка в светлой теме, плотная — в тёмной
+    val fill = if (c.light) Color(0xFFFFFEFA) else c.island
 
     Row(
         modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
-            .padding(start = 12.dp, end = 12.dp, bottom = 16.dp),
+            .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -53,22 +54,22 @@ fun Island(modifier: Modifier = Modifier) {
         Box(
             Modifier
                 .weight(1f)
-                .height(52.dp)
-                .clip(RoundedCornerShape(26.dp))
+                .height(44.dp)
+                .clip(RoundedCornerShape(22.dp))
                 .background(fill)
-                .padding(horizontal = 20.dp),
+                .padding(horizontal = 16.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
             BasicTextField(
                 value = text,
                 onValueChange = { text = it },
                 singleLine = true,
-                textStyle = ts(400, 17f, 24f, c.text),
+                textStyle = ts(400, 16f, 22f, c.text),
                 cursorBrush = SolidColor(c.primary),
                 modifier = Modifier.fillMaxWidth(),
                 decorationBox = { inner ->
                     Box(contentAlignment = Alignment.CenterStart) {
-                        if (text.isEmpty()) T("Заметка", ts(400, 17f, 24f, c.text2))
+                        if (text.isEmpty()) T("Заметка", ts(400, 16f, 22f, c.text2))
                         inner()
                     }
                 },
@@ -88,12 +89,12 @@ fun Island(modifier: Modifier = Modifier) {
 private fun IslandBtn(@DrawableRes id: Int, tint: Color, fill: Color, onClick: () -> Unit) {
     Box(
         Modifier
-            .size(52.dp)
+            .size(44.dp)
             .clip(CircleShape)
             .background(fill)
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Ico(id, tint, Modifier.size(26.dp))
+        Ico(id, tint, Modifier.size(24.dp))
     }
 }
