@@ -1,5 +1,31 @@
 package app.letniye
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animate
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateContentSize
@@ -69,116 +95,286 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-// Кривая и тайминги из ChatScreen второго проекта (TgDefault, INK_MS).
+// Кривая и тайминги из ChatScreen второго проекта (TgDefault, TgDecelerate, INK_MS).
 private val Ease = CubicBezierEasing(0.19919473f, 0.010644531f, 0.27920938f, 0.9102539f)
+private val Decel = Easing { t -> 1f - (1f - t) * (1f - t) }
 private const val INK_MS = 200f
 private const val MAX_LINES = 10
 
 /**
- * Островок ввода. В покое — три отдельных островка: «+», поле, кнопка гс/кружок.
- * Как только в поле есть текст, они сливаются в одну пилюлю (как в Telegram):
- * «+» остаётся слева внутри, а справа — круглая кнопка «отправить».
- * Размеры, шрифт 18sp, свои буквы с проявлением и своя каретка — из второго проекта.
+ * Островок ввода: одна цельная пилюля, внутри «+», поле и кнопка справа — иконки без подложек.
+ * Кнопка справа: гс ↔ кружок (тап переключает), при тексте — «отправить».
+ * Кружок: удержание кнопки открывает камеру ([VideoCamera]), готовый кружок приходит в [onVideo].
+ *
+ * Голосовое: удержание кнопки справа. Кружок вырастает из островка, поле заменяет
+ * панель записи (точка, таймер, «Влево — отмена»), свайп влево отменяет, вверх —
+ * фиксирует запись (замок → пауза → превью с обрезкой).
+ * Готовая запись приходит в [onVoice]: путь к m4a, секунды, волна.
  */
 @Composable
-fun Island(modifier: Modifier = Modifier) {
+fun Island(
+    modifier: Modifier = Modifier,
+    onVoice: (path: String, sec: Int, wave: List<Float>) -> Unit = { _, _, _ -> },
+    onVideo: (VideoResult) -> Unit = {},
+) {
     val c = LocalColors.current
+    val ctx = LocalContext.current
+    val haptics = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
     var input by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue("")) }
     var circle by rememberSaveable { mutableStateOf(false) }
     val has = input.text.isNotBlank()
+    // жест живёт дольше одной композиции — ему нужны свежие значения
+    val hasNow = rememberUpdatedState(has)
+    val onVoiceNow = rememberUpdatedState(onVoice)
+    val onVideoNow = rememberUpdatedState(onVideo)
+    var cam by remember { mutableStateOf(false) }
     // почти белая плотная заливка в светлой теме, плотная — в тёмной
     val fill = if (c.light) Color(0xFFFFFEFA) else c.island
 
-    // 0 — три островка, 1 — одна пилюля
-    val merge = animateFloatAsState(if (has) 1f else 0f, tween(250, easing = Ease), label = "merge")
-    val gap = (8f * (1f - merge.value)).dp
+    val voice = remember { VoiceRec() }
+    val vc = remember(c, fill) {
+        VoiceColors(fill, c.primary, c.onPrimary, c.text, c.text2, c.text2.copy(alpha = .6f), Color(0xFFE5484D))
+    }
+    val recT = remember { Animatable(0f) }
+    var recOn by remember { mutableStateOf(false) }
+    var micRect by remember { mutableStateOf<Rect?>(null) }
+    var rootRect by remember { mutableStateOf<Rect?>(null) }
+    val recPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    LaunchedEffect(recOn) {
+        // вход как в TG: recordCircleScale 0→1 за 300мс с DecelerateInterpolator;
+        // выход — ровно за время полёта кружка домой
+        if (recOn) recT.animateTo(1f, tween(300, easing = Decel))
+        else recT.animateTo(0f, tween(if (voice.returning) 420 else 250, easing = Ease))
+    }
+    LaunchedEffect(recOn) {
+        while (recOn) {
+            if (voice.recording) voice.poll()
+            kotlinx.coroutines.delay(50)
+        }
+    }
+    DisposableEffect(Unit) { onDispose { if (voice.recording) voice.cancel() } }
+
+    fun finishVoice() {
+        // stop() у MediaRecorder и склейка сегментов занимают сотни мс — уходим с UI-потока
+        recOn = false
+        scope.launch {
+            val res = withContext(Dispatchers.IO) { voice.finish() }
+            if (res != null) onVoiceNow.value(res.first, res.second, res.third)
+        }
+    }
+    /** кружок записи плавно возвращается на место кнопки и становится ею */
+    fun flyHome(from: Float) {
+        if (from >= 0.999f) { recOn = false; return }
+        voice.returnFrom = from; voice.returnR0 = 0f
+        voice.returning = true
+        recOn = false
+        scope.launch {
+            animate(from, 1f, animationSpec = tween(420, easing = FastOutSlowInEasing)) { v, _ ->
+                voice.slide.floatValue = v
+            }
+            // сначала возвращаем кнопку, потом гасим оверлей — на стыке оба рисуют один и тот же кружок
+            voice.returning = false
+            recT.snapTo(0f)
+        }
+    }
+    fun cancelVoice() {
+        if (voice.returning) return
+        val from = voice.slide.floatValue
+        scope.launch(Dispatchers.IO) { voice.cancel() }
+        flyHome(from)
+    }
+
     val focus = remember { FocusRequester() }
+    val panelOn by remember { derivedStateOf { recT.value > 0.01f } }
 
     Box(
         modifier
-            .fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
-            // поля пилюли в чате: 8 по бокам, 6 сверху, 8 снизу
-            .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 8.dp),
+            .fillMaxSize()
+            .onGloballyPositioned { rootRect = it.boundsInWindow() },
     ) {
-        Row(
+        Box(
             Modifier
+                .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                // общая пилюля проявляется под островками и закрывает щели между ними
-                .drawBehind {
-                    val a = merge.value
-                    if (a > 0f) drawRoundRect(fill, size = size, cornerRadius = CornerRadius(26.dp.toPx()), alpha = a)
-                },
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(gap),
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+                // поля пилюли в чате: 8 по бокам, 6 сверху, 8 снизу
+                .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 8.dp),
         ) {
-            // «+»
-            Box(
+            Row(
                 Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(fill)
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
-                contentAlignment = Alignment.Center,
-            ) { Ico(R.drawable.ic_add, c.text, Modifier.size(24.dp)) }
-
-            // поле: растёт вверх, вровень с кнопками по нижнему краю
-            Box(
-                Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(26.dp))
-                    .background(fill)
-                    .animateContentSize(tween(250, easing = Ease))
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                        focus.requestFocus()
-                    }
-                    // слитая пилюля: текст идёт сразу за «+» и до кнопки отправки
-                    .padding(start = (16f - 14f * merge.value).dp, end = (16f - 14f * merge.value).dp),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                IslandField(input, { input = it }, c, focus)
-            }
-
-            // гс ↔ кружок, а при тексте — «отправить»
-            Box(
-                Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(fill)
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                        if (has) input = TextFieldValue("") else circle = !circle
+                    .fillMaxWidth()
+                    // одна цельная пилюля, иконки и поле без своих подложек;
+                    // при записи гаснет — её место занимает панель записи
+                    .drawBehind {
+                        val a = 1f - recT.value
+                        if (a > 0f) drawRoundRect(fill, size = size, cornerRadius = CornerRadius(26.dp.toPx()), alpha = a)
                     },
-                contentAlignment = Alignment.Center,
+                verticalAlignment = Alignment.Bottom,
             ) {
-                // круглая кнопка отправки 40dp внутри пилюли
+                // «+»
                 Box(
                     Modifier
-                        .size(40.dp)
-                        .graphicsLayer {
-                            alpha = merge.value
-                            val s = 0.75f + 0.25f * merge.value
-                            scaleX = s; scaleY = s
+                        .size(48.dp)
+                        .graphicsLayer { alpha = 1f - recT.value }
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
+                    contentAlignment = Alignment.Center,
+                ) { Ico(R.drawable.ic_add, c.text, Modifier.size(24.dp)) }
+
+                // поле: растёт вверх, вровень с кнопками по нижнему краю
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .graphicsLayer { alpha = 1f - recT.value }
+                        .animateContentSize(tween(250, easing = Ease))
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                            if (!recOn) focus.requestFocus()
                         }
-                        .background(c.primary, CircleShape)
-                )
-                // смена иконки с масштабом и фейдом, как replaceIcon в TG
-                AnimatedContent(
-                    targetState = if (has) 0 else if (circle) 2 else 1,
-                    transitionSpec = {
-                        (fadeIn(tween(150, easing = Ease)) + scaleIn(initialScale = 0.4f, animationSpec = tween(150, easing = Ease)))
-                            .togetherWith(fadeOut(tween(120, easing = Ease)) + scaleOut(targetScale = 0.4f, animationSpec = tween(120, easing = Ease)))
-                            .using(SizeTransform(clip = false))
-                    },
-                    label = "sendIcon",
-                ) { st ->
-                    when (st) {
-                        0 -> Ico(R.drawable.ic_send, c.onPrimary, Modifier.size(24.dp))
-                        2 -> Ico(R.drawable.ic_rec, c.primary, Modifier.size(24.dp))
-                        else -> Ico(R.drawable.ic_mic, c.text, Modifier.size(24.dp))
+                        // текст идёт сразу за «+» и до кнопки справа
+                        .padding(start = 2.dp, end = 2.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    IslandField(input, { input = it }, c, focus)
+                }
+
+                // гс ↔ кружок, а при тексте — «отправить»
+                Box(
+                    Modifier
+                        .size(48.dp)
+                        .graphicsLayer {
+                            // при записи кнопку заменяет большой кружок оверлея — свою прячем
+                            alpha = when {
+                                voice.preview -> 1f
+                                voice.returning -> 0f
+                                else -> 1f - recT.value
+                            }
+                        }
+                        .onGloballyPositioned { micRect = it.boundsInWindow() }
+                        .pointerInput(Unit) {
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                if (voice.recording || voice.locked || voice.returning) return@awaitEachGesture
+                                // тап: отправить превью / очистить поле
+                                if (hasNow.value || voice.preview) {
+                                    val up = waitForUpOrCancellation()
+                                    if (up != null) {
+                                        if (voice.preview) finishVoice() else input = TextFieldValue("")
+                                    }
+                                    return@awaitEachGesture
+                                }
+                                // режим кружка: тап возвращает гс, удержание открывает камеру
+                                if (circle) {
+                                    var done = false
+                                    var tapped = false
+                                    withTimeoutOrNull(300L) {
+                                        val up = waitForUpOrCancellation()
+                                        done = true
+                                        tapped = up != null
+                                    }
+                                    if (done) {
+                                        if (tapped) circle = false
+                                    } else {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        cam = true
+                                        waitForUpOrCancellation()
+                                    }
+                                    return@awaitEachGesture
+                                }
+                                val granted = ContextCompat.checkSelfPermission(
+                                    ctx, Manifest.permission.RECORD_AUDIO
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!granted) {
+                                    recPerm.launch(Manifest.permission.RECORD_AUDIO)
+                                    return@awaitEachGesture
+                                }
+                                val t0 = System.currentTimeMillis()
+                                // состояние сбрасываем сразу, а MediaRecorder поднимаем в фоне:
+                                // prepare/start занимают 100-250мс, и кружок «появлялся уже большим»
+                                voice.prepareUi()
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                recOn = true
+                                scope.launch(Dispatchers.IO) {
+                                    if (!voice.startRecorder(ctx)) {
+                                        withContext(Dispatchers.Main) { if (recOn) cancelVoice() }
+                                    }
+                                }
+                                val startX = down.position.x
+                                val startY = down.position.y
+                                // distCanMove = min(35% ширины, 140dp) — как в TG
+                                val dist = minOf((rootRect?.width ?: 1080f) * 0.35f, 140.dp.toPx())
+                                val lockPx = 57.dp.toPx()
+                                while (true) {
+                                    val ev = awaitPointerEvent()
+                                    val ch = ev.changes.firstOrNull { it.id == down.id }
+                                        ?: ev.changes.firstOrNull() ?: break
+                                    if (!ch.pressed) {
+                                        // быстрый тап по гс — как и раньше, переключает на кружок
+                                        if (System.currentTimeMillis() - t0 < 250) circle = !circle
+                                        // отпустил: порог 0.45 как в TG
+                                        if (voice.slide.floatValue < 0.45f) cancelVoice()
+                                        else {
+                                            val from = voice.slide.floatValue
+                                            finishVoice()
+                                            flyHome(from)
+                                        }
+                                        break
+                                    }
+                                    val dx = ch.position.x - startX
+                                    val sl = (1f + dx / dist).coerceIn(0f, 1f)
+                                    voice.slide.floatValue = sl
+                                    if (sl <= 0f) { cancelVoice(); break }
+                                    val lt = ((startY - ch.position.y) / lockPx).coerceIn(0f, 1f)
+                                    voice.lockT.floatValue = lt
+                                    if (lt >= 1f && sl > 0.7f) {
+                                        voice.locked = true
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        break
+                                    }
+                                    ch.consume()
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    // смена иконки с масштабом и фейдом, как replaceIcon в TG
+                    AnimatedContent(
+                        targetState = if (has || voice.preview) 0 else if (circle) 2 else 1,
+                        transitionSpec = {
+                            (fadeIn(tween(150, easing = Ease)) + scaleIn(initialScale = 0.4f, animationSpec = tween(150, easing = Ease)))
+                                .togetherWith(fadeOut(tween(120, easing = Ease)) + scaleOut(targetScale = 0.4f, animationSpec = tween(120, easing = Ease)))
+                                .using(SizeTransform(clip = false))
+                        },
+                        label = "sendIcon",
+                    ) { st ->
+                        when (st) {
+                            0 -> Ico(R.drawable.ic_send, c.primary, Modifier.size(24.dp))
+                            2 -> Ico(R.drawable.ic_rec, c.primary, Modifier.size(24.dp))
+                            else -> Ico(R.drawable.ic_mic, c.text, Modifier.size(24.dp))
+                        }
                     }
                 }
             }
+            // панель записи заменяет «+» и поле, пока идёт запись
+            if (panelOn) {
+                RecordPanel(
+                    ctrl = voice, vc = vc, t = { recT.value },
+                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(48.dp),
+                    onCancel = { cancelVoice() },
+                )
+            }
         }
+        VoiceRecordOverlay(
+            ctrl = voice,
+            vc = vc,
+            visibleTF = { recT.value },
+            btnCenter = { micRect?.center },
+            rootOffset = { rootRect?.topLeft ?: Offset.Zero },
+            onSend = { finishVoice() },
+            onResume = { voice.resume(ctx) },
+        )
+        // своя камера: сначала обычное видео, потом круглая рамка
+        if (cam) VideoCamera(onClose = { cam = false }, onDone = { cam = false; onVideoNow.value(it) })
     }
 }
 

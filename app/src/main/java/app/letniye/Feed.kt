@@ -38,6 +38,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -82,7 +84,7 @@ private fun img(i: Int, w: Int, h: Int) = "https://picsum.photos/seed/$SEED$i/$w
 
 /** Лента: две равные колонки, карточка занимает колонку целиком, высота своя. */
 @Composable
-fun Feed(state: LazyStaggeredGridState, header: HeaderState) {
+fun Feed(state: LazyStaggeredGridState, header: HeaderState, posts: List<Post>) {
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     LazyVerticalStaggeredGrid(
@@ -94,7 +96,7 @@ fun Feed(state: LazyStaggeredGridState, header: HeaderState) {
         verticalItemSpacing = 8.dp,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        itemsIndexed(FEED, key = { i, _ -> i }) { i, post -> FeedItem(post, i) }
+        itemsIndexed(posts, key = { _, p -> p.id }) { _, post -> FeedItem(post, post.k) }
     }
 }
 
@@ -134,10 +136,10 @@ private fun FeedItem(post: Post, i: Int) {
 
 /** .card:active { opacity:.9 } */
 @Composable
-private fun Modifier.press(src: MutableInteractionSource): Modifier {
+private fun Modifier.press(src: MutableInteractionSource, onClick: () -> Unit = {}): Modifier {
     val pressed by src.collectIsPressedAsState()
     return graphicsLayer { alpha = if (pressed) .9f else 1f }
-        .clickable(interactionSource = src, indication = null, onClick = {})
+        .clickable(interactionSource = src, indication = null, onClick = onClick)
 }
 
 @Composable
@@ -163,12 +165,19 @@ private fun PhotoCard(p: Post, i: Int) {
 private fun CircleCard(p: Post, i: Int) {
     val c = LocalColors.current
     val src = remember { MutableInteractionSource() }
+    val own = p.vid.isNotEmpty()
+    // свой кружок играет без звука; тап включает и выключает звук
+    var sound by remember { mutableStateOf(false) }
     BoxWithConstraints(
-        Modifier.fillMaxWidth().press(src).aspectRatio(1f).clip(CircleShape).background(c.surface),
+        Modifier.fillMaxWidth().press(src) { if (own) sound = !sound }.aspectRatio(1f).clip(CircleShape).background(c.surface),
     ) {
-        AsyncImage(img(i, 400, 400), null, Modifier.matchParentSize(), contentScale = ContentScale.Crop)
-        Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = .16f)))
-        Ico(R.drawable.ic_play_r, Color.White, Modifier.align(Alignment.Center).fillMaxSize(.3f))
+        if (own) {
+            CircleVideo(p, sound, Modifier.matchParentSize())
+        } else {
+            AsyncImage(img(i, 400, 400), null, Modifier.matchParentSize(), contentScale = ContentScale.Crop)
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = .16f)))
+            Ico(R.drawable.ic_play_r, Color.White, Modifier.align(Alignment.Center).fillMaxSize(.3f))
+        }
         T(
             p.d,
             ts(500, 12f, 16f, Color.White),

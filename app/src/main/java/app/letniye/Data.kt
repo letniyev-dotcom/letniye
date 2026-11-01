@@ -34,6 +34,15 @@ data class Post(
     val p: String = "",
     val ti: String = "",
     val ar: String = "",
+    /** id — ключ в ленте, k — номер для картинки и даты; vid — свой кружок: mp4 и рамка (cx, cy, cd — доли кадра). */
+    val id: Int = 0,
+    val k: Int = 0,
+    val vid: String = "",
+    val vw: Int = 0,
+    val vh: Int = 0,
+    val cx: Float = .5f,
+    val cy: Float = .5f,
+    val cd: Float = 1f,
 )
 
 /** false — убрать имена под постами совсем. */
