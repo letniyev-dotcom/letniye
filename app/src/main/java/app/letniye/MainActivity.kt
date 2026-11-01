@@ -57,6 +57,7 @@ fun App() {
         Box(Modifier.fillMaxSize().background(colors.bg)) {
             Feed(grid, header)
             TopFade(header, Modifier.align(Alignment.TopCenter))
+            BottomFade(Modifier.align(Alignment.BottomCenter))
             Header(header) { light = !light }
             Island(Modifier.align(Alignment.BottomCenter))
         }
