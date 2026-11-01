@@ -2,6 +2,8 @@
 
 Лента-демо, перенесённая из `letniye_41.html`. Профиль пока не переписан.
 
+Карточки: заметки — стекло цвета заметки (`Post.col`), музыка — обложка на всю карточку с прогрессивным блюром (блюр с Android 12), даты под карточками (`SHOW_DATES`).
+
 ## Сборка
 Только release. GitHub Actions (`.github/workflows/release.yml`) запускается на push в `main`, на теги `v*` и вручную.
 APK лежит в Artifacts запуска (`letniye-release-apk`), для тегов — ещё и в GitHub Releases.
