@@ -1,41 +1,58 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose")
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
 }
 
-// Подпись берётся из переменных окружения (их выставляет GitHub Actions).
-val keystorePath: String? = System.getenv("KEYSTORE_PATH")
+// Подпись release-сборки. Если GitHub Actions передал свои секреты (LETNIE_KEYSTORE...), используются они,
+// иначе — постоянный ключ из app/signing/letnie.jks. Ключ один и тот же в каждой сборке,
+// поэтому новая версия ставится поверх старой без удаления приложения.
+val keystorePath: String = System.getenv("LETNIE_KEYSTORE") ?: "signing/letnie.jks"
+val keystorePass: String = System.getenv("LETNIE_KEYSTORE_PASSWORD") ?: "letnie-release"
+val keyAliasName: String = System.getenv("LETNIE_KEY_ALIAS") ?: "letnie"
+val keyPass: String = System.getenv("LETNIE_KEY_PASSWORD") ?: keystorePass
+
+// versionCode обязан расти с каждой сборкой, иначе Android не обновит приложение: берём номер запуска CI
+val buildNumber: Int = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
 
 android {
-    namespace = "app.letniye"
-    compileSdk = 35
+    namespace = "app.letnievpn"
+    compileSdk = 37
 
     defaultConfig {
-        applicationId = "app.letniye"
-        minSdk = 28
+        applicationId = "app.letnievpn"
+        minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 100 + buildNumber
+        versionName = "1.1.$buildNumber"
+    }
+
+    // Один универсальный APK + отдельные по архитектурам (arm64 — самый лёгкий)
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            isUniversalApk = true
+        }
     }
 
     signingConfigs {
-        if (keystorePath != null) {
-            create("release") {
-                storeFile = file(keystorePath)
-                storePassword = System.getenv("KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("KEY_ALIAS")
-                keyPassword = System.getenv("KEY_PASSWORD")
-            }
+        create("release") {
+            storeFile = file(keystorePath)
+            storePassword = keystorePass
+            keyAlias = keyAliasName
+            keyPassword = keyPass
         }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.findByName("release")
+            isMinifyEnabled = false
+            isShrinkResources = false
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
@@ -43,22 +60,40 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+
+    buildFeatures {
+        compose = true
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
+// Debug-сборки не нужны: отключаем debug-вариант полностью
+androidComponents {
+    beforeVariants(selector().withBuildType("debug")) { variantBuilder ->
+        variantBuilder.enable = false
+    }
 }
 
 dependencies {
-    val bom = platform("androidx.compose:compose-bom:2024.12.01")
-    implementation(bom)
-    implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("io.coil-kt:coil-compose:2.7.0")
-    val camerax = "1.4.1"
-    implementation("androidx.camera:camera-core:$camerax")
-    implementation("androidx.camera:camera-camera2:$camerax")
-    implementation("androidx.camera:camera-lifecycle:$camerax")
-    implementation("androidx.camera:camera-video:$camerax")
-    implementation("androidx.camera:camera-view:$camerax")
+    // ядро xray (libv2ray.aar) кладёт в app/libs GitHub Actions
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
+
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.activity.compose)
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.foundation)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.kotlinx.coroutines.android)
 }

@@ -1,1 +1,2 @@
-# Правила по умолчанию достаточно: Compose и Coil приносят свои consumer-rules.
+-keep class go.** { *; }
+-keep class libv2ray.** { *; }
